@@ -163,4 +163,5 @@ cython_debug/
 
 
 camargo
-datasetcsv_output
+logs
+csv_dataset

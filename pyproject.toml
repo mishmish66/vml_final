@@ -3,22 +3,23 @@ name = "vml_final"
 
 dependencies = [
     "jax",
+    "jaxlib",
     "flax",
+    "pandas",
+    "orbax",
+    "einops",
+    "tqdm",
+    "torch",
+    "optax",
+    "scipy",
+    "tensorboard",
+    "treescope",
+    "jax_verify @ git+https://gitlab.com/neu-autonomy/certifiable-learning/jax_verify",
 ]
+
 
 readme = "README.md"
 version = "0.1.0"
-description = "Default template for PDM package"
-authors = [
-    {name = "Misha Lvovsky", email = "lvovsky.m@northeastern.edu"},
-]
+description = "Final project for VML class."
+authors = [{ name = "Misha Lvovsky", email = "lvovsky.m@northeastern.edu" }]
 requires-python = ">=3.9"
-license = {text = "MIT"}
-
-[tool.pdm]
-distribution = false
-
-[tool.pdm.dev-dependencies]
-dev = [
-    "-e file:///${PROJECT_ROOT}/#egg=vml-final",
-]
