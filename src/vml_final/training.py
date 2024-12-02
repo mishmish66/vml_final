@@ -9,12 +9,11 @@ from tqdm import tqdm
 
 @nnx.jit
 def train_step(optim, x, y):
-
     def loss_func(model):
         y_inferred = model(x)
         errors = y_inferred - y
-        mse = jnp.square(errors).mean()
-        return mse
+        mae = jnp.abs(errors).mean()
+        return mae
 
     loss, model_grad = nnx.value_and_grad(loss_func)(optim.model)
     optim.update(model_grad)

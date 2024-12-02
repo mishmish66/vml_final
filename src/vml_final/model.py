@@ -26,7 +26,7 @@ class TemporalBlock(nnx.Module):
             rngs=rngs,
         )
         self.bn1 = nnx.BatchNorm(out_features, rngs=rngs)
-        self.relu = nnx.relu
+        self.relu = relu
         self.dropout = nnx.Dropout(dropout, rngs=rngs)
 
         # Second convolution layer

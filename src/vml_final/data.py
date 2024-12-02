@@ -6,6 +6,16 @@ import pandas as pd
 from einops import rearrange
 
 
+def sliding_windowify(x, stack_size):
+    slid = np.lib.stride_tricks.sliding_window_view(
+        x,
+        stack_size,
+        -2,
+    )
+    # Swapaxes so that the final axis remains the feature dimension (... time feature)
+    return slid.swapaxes(-1, -2)
+
+
 def _extract_trial(data_dir: Path, trial_label: str, sensors_to_use: List[str]):
 
     sensor_data_list = []
@@ -135,12 +145,12 @@ class CSVDataset:
         y_list = [y_trial for y_trial in y_list if len(y_trial) >= 100]
 
         # Sliding windowify the data
-        x_list = [np.lib.stride_tricks.sliding_window_view(x_trial, stack_size, -2) for x_trial in x_list]
+        x_list = [sliding_windowify(x_trial, stack_size) for x_trial in x_list]
         y_list = [y_trial[stack_size - 1 :] for y_trial in y_list]
 
-        # Filter out indices that have overly repetitive speeds to avoid bias
-        for i in range(len(x_list)):
-            x_list[i], y_list[i] = filter_common(x_list[i], y_list[i])
+        # # Filter out indices that have overly repetitive speeds to avoid bias
+        # for i in range(len(x_list)):
+        #     x_list[i], y_list[i] = filter_common(x_list[i], y_list[i])
 
         # Cat together the lists to make training data
         x_arr = np.concatenate(x_list)
