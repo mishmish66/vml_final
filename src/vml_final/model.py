@@ -1,4 +1,11 @@
+import jax
 from flax import nnx
+from jax import numpy as jnp
+from flax import linen as nn
+
+
+def relu(x):
+    return jnp.maximum(x, 0.0)
 
 
 class TemporalBlock(nnx.Module):
@@ -7,23 +14,15 @@ class TemporalBlock(nnx.Module):
         in_features,
         out_features,
         kernel_size,
-        stride,
-        dilation,
         dropout=0.2,
         *,
         rngs: nnx.Rngs,
     ):
-        # Calculate padding to keep output size the same as input size
-        padding = "SAME"
-
         # First convolution layer
         self.conv1 = nnx.Conv(
             in_features,
             out_features,
             kernel_size,
-            strides=stride,
-            padding=padding,
-            kernel_dilation=dilation,
             rngs=rngs,
         )
         self.bn1 = nnx.BatchNorm(out_features, rngs=rngs)
@@ -35,9 +34,6 @@ class TemporalBlock(nnx.Module):
             out_features,
             out_features,
             kernel_size,
-            strides=stride,
-            padding=padding,
-            kernel_dilation=dilation,
             rngs=rngs,
         )
         self.bn2 = nnx.BatchNorm(out_features, rngs=rngs)
@@ -59,42 +55,28 @@ class TemporalBlock(nnx.Module):
         if self.downsample is not None:
             x = self.downsample(x)
         # Slice output to match input length (in case padding added extra time steps)
-        out = out[..., : x.shape[-1]]
-        return self.relu(out + x)
+        out = x[..., : out.shape[-1]]
+        return out + x
 
 
 class TemporalConvolutionalNetwork(nnx.Module):
     def __init__(
         self,
         input_channels,
-        extractor_hidden_features,
-        extractor_groups,
-        extractor_kernel_size,
         hidden_dims,
         kernel_size=3,
         dropout=0.2,
+        stride=3,
         *,
         rngs: nnx.Rngs,
     ):
-        layers = []
-
-        initial_pointwise = nnx.Conv(
+        self.extractor = nnx.Conv(
             input_channels,
-            extractor_hidden_features,
-            1,
-            # strides=1,
-            # padding="SAME",
-            # kernel_dilation=1,
-            rngs=rngs,
-        )
-        initial_depthwise = nnx.Conv(
-            extractor_hidden_features,
             hidden_dims[0],
-            extractor_kernel_size,
-            padding="SAME",
-            feature_group_count=extractor_groups,
+            kernel_size,
             rngs=rngs,
         )
+        layers = []
 
         for layer_in_channels, layer_out_channels in zip(
             hidden_dims[:-1], hidden_dims[1:]
@@ -104,26 +86,27 @@ class TemporalConvolutionalNetwork(nnx.Module):
                     layer_in_channels,
                     layer_out_channels,
                     kernel_size,
-                    stride=1,
-                    dilation=1,
-                    dropout=dropout,
+                    dropout,
                     rngs=rngs,
                 ),
-                # Strided convolution to downscale
+                relu,
+                # Strided conv to downscale
                 nnx.Conv(
                     layer_out_channels,
                     layer_out_channels,
                     kernel_size,
-                    2,
+                    strides=stride,
+                    feature_group_count=layer_out_channels,
                     rngs=rngs,
                 ),
+                relu,
             ]
 
-        self.network = nnx.Sequential(initial_pointwise, initial_depthwise, *layers)
+        self.network = nnx.Sequential(*layers)
         self.linear = nnx.Linear(hidden_dims[-1], 1, rngs=rngs)
 
     def __call__(self, x):
-        # Input shape: [batch_size, channels, timesteps]
+        x = self.extractor(x)
         y = self.network(x)
         y = y[..., -1, :]  # Take the last time step output
         return self.linear(y)  # Squeeze the time dim

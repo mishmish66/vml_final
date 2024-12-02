@@ -68,6 +68,14 @@ def _extract_trial(data_dir: Path, trial_label: str, sensors_to_use: List[str]):
     return x_trial, y_trial
 
 
+def filter_common(x, y):
+    y_vals, y_counts = np.unique_counts(y)
+    uncommon_vals = y_vals[y_counts < 128]
+
+    idxs_of_uncommon = np.isin(y, uncommon_vals)
+    return x[idxs_of_uncommon], y[idxs_of_uncommon]
+
+
 class CSVDataset:
     def __init__(
         self,
@@ -115,7 +123,7 @@ class CSVDataset:
             y_list.append(y_trial)
 
         # Ensure consistency across trials by keeping only columns that are common across all trials
-        common_headers = {col for X_trial in x_list for col in x_trial.columns}
+        common_headers = {col for x_trial in x_list for col in x_trial.columns}
         for x_trial in x_list:
             common_headers.intersection_update(x_trial.columns)
 
@@ -124,39 +132,22 @@ class CSVDataset:
 
         # Filter out trials with less than 100 timesteps
         x_list = [x_trial for x_trial in x_list if len(x_trial) >= 100]
-        x_list = [x_trial for y_trial in y_list if len(y_trial) >= 100]
+        y_list = [y_trial for y_trial in y_list if len(y_trial) >= 100]
 
-        # # Print the shape of X and y
-        # print(
-        #     f"Shape of Xs after filtering common headers: {[x_trial.shape for x_trial in x_list]}"
-        # )
-        # print(f"Shape of ys: {[y_trial.shape for y_trial in y_list]}")
+        # Sliding windowify the data
+        x_list = [np.lib.stride_tricks.sliding_window_view(x_trial, stack_size, -2) for x_trial in x_list]
+        y_list = [y_trial[stack_size - 1 :] for y_trial in y_list]
 
-        # # Check for NaN values in x and y
-        # nan_count_x = sum(x_trial.isna().sum().sum() for x_trial in x_list)
-        # nan_count_y = sum(y_trial.isna().sum() for y_trial in y_list)
+        # Filter out indices that have overly repetitive speeds to avoid bias
+        for i in range(len(x_list)):
+            x_list[i], y_list[i] = filter_common(x_list[i], y_list[i])
 
-        # print(f"Number of NaN values in x: {nan_count_x}")
-        # print(f"Number of NaN values in y: {nan_count_y}")
+        # Cat together the lists to make training data
+        x_arr = np.concatenate(x_list)
+        y_arr = np.concatenate(y_list)
 
-        # # Check for infinite values in x and y
-        # inf_count_x = sum(np.isinf(x_trial.values).sum() for x_trial in x_list)
-        # inf_count_y = sum(np.isinf(y_trial).sum() for y_trial in y_list)
-
-        # print(f"Number of infinite values in x: {inf_count_x}")
-        # print(f"Number of infinite values in y: {inf_count_y}")
-
-        strided_xs = np.concatenate(
-            [
-                np.lib.stride_tricks.sliding_window_view(x_trial, stack_size, -2)
-                for x_trial in x_list
-            ]
-        )
-
-        strided_xs = rearrange(strided_xs, "... s t -> ... t s")
-
-        self.x = strided_xs
-        self.y = np.concatenate([y_trial[stack_size - 1 :] for y_trial in y_list])
+        self.x = x_arr
+        self.y = y_arr
 
         # Get the train and validation splits
         shuffled_inds = np.arange(len(self.y))
@@ -201,7 +192,7 @@ class CSVDatasetEpochIterator:
         batch_inds = self.epoch_inds[self.counter]
         self.counter = self.counter + 1
         return self.loader[batch_inds]
-    
+
     def __len__(self):
         return len(self.epoch_inds) - self.counter
 
