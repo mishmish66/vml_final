@@ -167,10 +167,10 @@ class CSVDataset:
         self.train_inds = shuffled_inds[:first_validation_ind]
         self.validation_inds = shuffled_inds[first_validation_ind:]
 
-    def get_batch(self, batch_size: int, train: bool):
+    def get_batch(self, batch_size: int, train: bool = True):
         inds = self.train_inds if train else self.validation_inds
 
-        selected_inds = np.random.choice(batch_size, inds)
+        selected_inds = np.random.choice(inds, batch_size)
 
         return self.x[selected_inds], self.y[selected_inds]
 

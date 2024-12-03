@@ -1,11 +1,38 @@
 import jax
+from einops import rearrange
+from flax import linen as nn
 from flax import nnx
 from jax import numpy as jnp
-from flax import linen as nn
 
 
 def relu(x):
     return jnp.maximum(x, 0.0)
+
+
+class MaxPool(nnx.Module):
+    def __init__(self, window_size, dim=-1):
+        self.window_size = window_size
+        self.dim = dim
+
+    def __call__(self, x):
+        window_count = x.shape[self.dim] // self.window_size
+
+        # Bring the relevant dim to the front
+        x = jnp.moveaxis(x, self.dim, 0)
+        # Grab the remainder after windowifying
+        x_leftover = x[window_count * self.window_size :]
+        x = x[: window_count * self.window_size]
+        x = rearrange(
+            x, "(windows in_window) ... -> in_window windows ...", windows=window_count
+        )
+        # Now do the max
+        x = jnp.max(x, axis=0)
+        # Handle the leftover
+        x_leftover = jnp.max(x_leftover, axis=0, keepdims=True)
+
+        x = jnp.concatenate([x, x_leftover], axis=0)
+
+        return jnp.moveaxis(x, 0, self.dim)
 
 
 class TemporalBlock(nnx.Module):
@@ -63,50 +90,53 @@ class TemporalConvolutionalNetwork(nnx.Module):
     def __init__(
         self,
         input_channels,
-        hidden_dims,
+        conv_hidden_dims,
+        mlp_hidden_dims=[],
         kernel_size=3,
         dropout=0.2,
         stride=3,
         *,
         rngs: nnx.Rngs,
     ):
-        self.extractor = nnx.Conv(
+        # Extractor does not have strides
+        self.initial_extractor = nnx.Conv(
             input_channels,
-            hidden_dims[0],
+            conv_hidden_dims[0],
             kernel_size,
             rngs=rngs,
         )
         layers = []
 
         for layer_in_channels, layer_out_channels in zip(
-            hidden_dims[:-1], hidden_dims[1:]
+            conv_hidden_dims[:-1], conv_hidden_dims[1:]
         ):
             layers += [
-                TemporalBlock(
+                nnx.BatchNorm(layer_in_channels, rngs=rngs),
+                relu,
+                nnx.Conv(
                     layer_in_channels,
                     layer_out_channels,
                     kernel_size,
-                    dropout,
-                    rngs=rngs,
-                ),
-                relu,
-                # Strided conv to downscale
-                nnx.Conv(
-                    layer_out_channels,
-                    layer_out_channels,
-                    kernel_size,
                     strides=stride,
-                    feature_group_count=layer_out_channels,
                     rngs=rngs,
                 ),
-                relu,
             ]
 
-        self.network = nnx.Sequential(*layers)
-        self.linear = nnx.Linear(hidden_dims[-1], 1, rngs=rngs)
+        self.convnet = nnx.Sequential(*layers)
+
+        mlp_dims = conv_hidden_dims[-1:] + mlp_hidden_dims + [1]
+        mlp_layer_list = []
+        for mlp_layer_in_dim, mlp_layer_out_dim in zip(mlp_dims[:-1], mlp_dims[1:]):
+            mlp_layer_list += [
+                relu,
+                nnx.Linear(mlp_layer_in_dim, mlp_layer_out_dim, rngs=rngs),
+            ]
+
+        self.mlp = nnx.Sequential(*mlp_layer_list)
 
     def __call__(self, x):
-        x = self.extractor(x)
-        y = self.network(x)
+        x = self.initial_extractor(x)
+        y = self.convnet(x)
         y = y[..., -1, :]  # Take the last time step output
-        return self.linear(y)  # Squeeze the time dim
+        y = self.mlp(y)
+        return y[..., 0] # Squeeze the last dim
