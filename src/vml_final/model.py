@@ -111,6 +111,7 @@ class TemporalConvolutionalNetwork(nnx.Module):
             conv_hidden_dims[:-1], conv_hidden_dims[1:]
         ):
             layers += [
+                nnx.Dropout(dropout, rngs=rngs),
                 nnx.BatchNorm(layer_in_channels, rngs=rngs),
                 relu,
                 nnx.Conv(
@@ -137,6 +138,10 @@ class TemporalConvolutionalNetwork(nnx.Module):
     def __call__(self, x):
         x = self.initial_extractor(x)
         y = self.convnet(x)
+        if y.shape[-2] > 1:
+            print(
+                f"Warning: the output is indexing only the last time step, this may cause information loss. The final time dim is {y.shape[-2]}"
+            )
         y = y[..., -1, :]  # Take the last time step output
         y = self.mlp(y)
-        return y[..., 0] # Squeeze the last dim
+        return y[..., 0]  # Squeeze the last dim

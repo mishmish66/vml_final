@@ -1,9 +1,13 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Callable, Sequence
 
+import jax
+import jax_dataclasses as jdc
 import numpy as np
 import pandas as pd
 from einops import rearrange
+from jax import numpy as jnp
+from typing_extensions import Self
 
 
 def sliding_windowify(x, stack_size):
@@ -86,14 +90,49 @@ def filter_common(x, y):
     return x[idxs_of_uncommon], y[idxs_of_uncommon]
 
 
+def _extract_from_set(data_dir: Path, sensors_to_use: List[str]):
+
+    trial_condition_paths = list(data_dir.rglob("*conditions_*"))
+    trial_labels = [
+        condition_path.name.split("_")[2] for condition_path in trial_condition_paths
+    ]
+
+    # To store X and y for each trial
+    x_list = []
+    y_list = []
+
+    # Load each dataset and process independently
+    for trial_label in trial_labels:
+        print(f"\nProcessing trial: {trial_label}")
+        x_trial, y_trial = _extract_trial(data_dir, trial_label, sensors_to_use)
+        x_list.append(x_trial)
+        y_list.append(y_trial)
+
+    return x_list, y_list
+
+
+@jdc.pytree_dataclass
 class CSVDataset:
-    def __init__(
-        self,
-        data_dir: Path,
+    x: jax.Array = jdc.field(default_factory=lambda: jnp.empty(0, dtype=jnp.float32))
+    y: jax.Array = jdc.field(default_factory=lambda: jnp.empty(0, dtype=jnp.float32))
+    train_idxs: jax.Array = jdc.field(
+        default_factory=lambda: jnp.empty(0, dtype=jnp.int32)
+    )
+    validation_idxs: jax.Array = jdc.field(
+        default_factory=lambda: jnp.empty(0, dtype=jnp.int32)
+    )
+    stack_size: int = 200
+
+    @classmethod
+    def build(
+        cls,
+        key: jax.Array,
+        data_dirs: List[Path],
         sensors_to_use: Optional[List[str]] = None,
-        stack_size: int = 32,
-        train_frac: float = 0.1,
-    ):
+        stack_size: int = 200,
+        train_frac: float = 0.9,
+    ) -> Self:
+
         all_sensors = [
             "emg",
             "fp",
@@ -115,22 +154,12 @@ class CSVDataset:
         if len(bad_sensor_names) != 0:
             raise ValueError(f"{bad_sensor_names} are not in {all_sensors}")
 
-        trial_condition_paths = list(data_dir.rglob("*conditions_*"))
-        trial_labels = [
-            condition_path.name.split("_")[2]
-            for condition_path in trial_condition_paths
-        ]
-
-        # To store X and y for each trial
         x_list = []
         y_list = []
 
-        # Load each dataset and process independently
-        for trial_label in trial_labels:
-            print(f"\nProcessing trial: {trial_label}")
-            x_trial, y_trial = _extract_trial(data_dir, trial_label, sensors_to_use)
-            x_list.append(x_trial)
-            y_list.append(y_trial)
+        for data_dir in data_dirs:
+            dir_x_list, dir_y_list = _extract_from_set(data_dir, sensors_to_use)
+            x_list.extend(dir_x_list), y_list.extend(dir_y_list)
 
         # Ensure consistency across trials by keeping only columns that are common across all trials
         common_headers = {col for x_trial in x_list for col in x_trial.columns}
@@ -145,79 +174,111 @@ class CSVDataset:
         y_list = [y_trial for y_trial in y_list if len(y_trial) >= 100]
 
         # Sliding windowify the data
-        x_list = [sliding_windowify(x_trial, stack_size) for x_trial in x_list]
-        y_list = [y_trial[stack_size - 1 :] for y_trial in y_list]
+        # x_list = [sliding_windowify(x_trial, stack_size) for x_trial in x_list]
+        # y_list = [y_trial[stack_size - 1 :] for y_trial in y_list]
 
         # # Filter out indices that have overly repetitive speeds to avoid bias
         # for i in range(len(x_list)):
         #     x_list[i], y_list[i] = filter_common(x_list[i], y_list[i])
 
         # Cat together the lists to make training data
-        x_arr = np.concatenate(x_list)
-        y_arr = np.concatenate(y_list)
+        x_arr = jnp.array(np.concatenate(x_list))
+        y_arr = jnp.array(np.concatenate(y_list))
 
-        self.x = x_arr
-        self.y = y_arr
+        rng, key = jax.random.split(key)
+        valid_idxs = jnp.arange(len(y_arr))
 
-        # Get the train and validation splits
-        shuffled_inds = np.arange(len(self.y))
-        np.random.shuffle(shuffled_inds)
+        running_ind = 0
+        for y_trial in y_list:
+            pad_start = running_ind
+            pad_end = pad_start + stack_size
+            # Remove pad idxs each time
+            valid_idxs = np.concatenate([valid_idxs[:pad_start], valid_idxs[pad_end:]])
+            # Advance by the size of the trial minus the padding
+            running_ind = pad_start + len(y_trial) - stack_size
 
-        first_validation_ind = int(train_frac * len(shuffled_inds))
-        self.train_inds = shuffled_inds[:first_validation_ind]
-        self.validation_inds = shuffled_inds[first_validation_ind:]
+        shuffled_idxs = jax.random.permutation(rng, valid_idxs)
 
-    def get_batch(self, batch_size: int, train: bool = True):
-        inds = self.train_inds if train else self.validation_inds
+        first_validation_ind = int(train_frac * len(shuffled_idxs))
+        train_idxs = shuffled_idxs[:first_validation_ind]
+        validation_idxs = shuffled_idxs[first_validation_ind:]
 
-        selected_inds = np.random.choice(inds, batch_size)
-
-        return self.x[selected_inds], self.y[selected_inds]
-
-    def make_epoch_inds(self, batch_size: int, train: bool):
-        # Shuffle the train inds
-        shuffled = np.copy(self.train_inds)
-        np.random.shuffle(shuffled)
-
-        # Trim off the end to make it a perfect number of batches
-        shuffled_trimmed = shuffled[: (len(shuffled) // batch_size) * batch_size]
-        # Reshape into batches
-        return shuffled_trimmed.reshape(-1, batch_size)
-
-    def __getitem__(self, index):
-        return self.x[index], self.y[index]
-
-
-class CSVDatasetEpochIterator:
-    def __init__(self, loader: "CSVDatasetEpochLoader"):
-        self.loader = loader
-        self.counter = 0
-        self.epoch_inds = self.loader.csv_dataset.make_epoch_inds(
-            self.loader.batch_size, train=self.loader.train
+        return cls(
+            x=x_arr,
+            y=y_arr,
+            train_idxs=train_idxs,
+            validation_idxs=validation_idxs,
+            stack_size=stack_size,
         )
 
-    def __next__(self):
-        if self.counter >= len(self.epoch_inds):
-            raise StopIteration
-        batch_inds = self.epoch_inds[self.counter]
-        self.counter = self.counter + 1
-        return self.loader[batch_inds]
+    def get_batch(self, key: jax.Array, batch_size: int, train: bool = True):
+        idxs = self.train_idxs if train else self.validation_idxs
 
-    def __len__(self):
-        return len(self.epoch_inds) - self.counter
+        rng, key = jax.random.split(key)
+        selected_inds = jax.random.choice(rng, idxs, (batch_size,), replace=False)
+
+        return self[selected_inds]
+
+    def make_epoch_inds(self, key, batch_size: int, train: bool):
+        # Shuffle the train inds
+        idxs = self.train_idxs if train else self.validation_idxs
+
+        key, rng = jax.random.split(key)
+        shuffled_inds = jax.random.permutation(rng, idxs)
+
+        # Trim off the end to make it a perfect number of batches
+        trim_size = (len(idxs) // batch_size) * batch_size
+        shuffled_trimmed = shuffled_inds[:trim_size]
+        # Reshape into batches
+        return rearrange(shuffled_trimmed, "(n b) ... -> n b ...", b=batch_size)
+
+    def __getitem__(self, idxs):
+        def slice_x(idx):
+            slice_start = idx - self.stack_size + 1
+            return jax.lax.dynamic_slice_in_dim(self.x, slice_start, self.stack_size)
+
+        def index_y(idx):
+            return jax.lax.dynamic_index_in_dim(self.y, idx)
+
+        x_indexed = jax.vmap(slice_x)(idxs)
+        y_indexed = jax.vmap(index_y)(idxs)[..., 0]
+
+        return x_indexed, y_indexed
 
 
+# class CSVDatasetEpochIterator:
+#     def __init__(self, loader: "CSVDatasetEpochLoader"):
+#         self.loader = loader
+#         self.counter = 0
+#         self.epoch_inds = self.loader.csv_dataset.make_epoch_inds(
+#             self.loader.batch_size, train=self.loader.train
+#         )
+
+#     def __next__(self):
+#         if self.counter >= len(self.epoch_inds):
+#             raise StopIteration
+#         batch_inds = self.epoch_inds[self.counter]
+#         self.counter = self.counter + 1
+#         return self.loader[batch_inds]
+
+
+@jdc.pytree_dataclass
 class CSVDatasetEpochLoader:
-    def __init__(self, csv_dataset: CSVDataset, batch_size: int, train: bool = True):
-        self.csv_dataset = csv_dataset
-        self.batch_size = batch_size
-        self.train = train
+    csv_dataset: CSVDataset
+    batch_size: int
+    train: bool = True
 
-    def __iter__(self):
-        return CSVDatasetEpochIterator(self)
+    def scan_for_epoch(self, key: jax.Array, f, init_carry):
 
-    def __getitem__(self, index):
-        return self.csv_dataset[index]
+        rng, key = jax.random.split(key)
+        epoch_indices = self.csv_dataset.make_epoch_inds(
+            rng, self.batch_size, self.train
+        )
 
-    def __len__(self):
-        return len(self.csv_dataset.train_inds) // self.batch_size
+        def scanf(carry, batch_indices):
+            x, y = self.csv_dataset[batch_indices]
+            carry, out = f(carry, (x, y))
+
+            return carry, out
+
+        return jax.lax.scan(scanf, init_carry, epoch_indices)
